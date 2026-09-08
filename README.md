@@ -129,6 +129,7 @@ You can reuse an offline worker name after its pending work has been cleared.
 - Say whether it may edit files, run commands, stage changes, or commit.
 - Use different workers for independent tasks that can run in parallel.
 - Keep both sessions in the same Git repository so project-local discovery works.
+  The primary checkout and its linked Git worktrees are treated as one project.
 
 Workers do not share conversation context. Include all information the receiving
 agent needs in the delegated request.

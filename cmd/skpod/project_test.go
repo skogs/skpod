@@ -7,37 +7,68 @@ import (
 )
 
 func TestProjectRootUsesNearestGitMarker(t *testing.T) {
-	for _, marker := range []string{"directory", "file"} {
-		t.Run(marker, func(t *testing.T) {
-			root := t.TempDir()
-			gitMarker := filepath.Join(root, ".git")
-			var err error
-			if marker == "directory" {
-				err = os.Mkdir(gitMarker, 0o755)
-			} else {
-				err = os.WriteFile(gitMarker, []byte("gitdir: elsewhere"), 0o600)
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			nested := filepath.Join(root, "apps", "api")
-			if err := os.MkdirAll(nested, 0o755); err != nil {
-				t.Fatal(err)
-			}
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(root, "apps", "api")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
 
-			got, err := projectRoot(nested)
-			if err != nil {
-				t.Fatal(err)
-			}
-			want, err := filepath.EvalSymlinks(root)
-			if err != nil {
-				t.Fatal(err)
-			}
-			want = normalizeProjectPath(want)
-			if got != want {
-				t.Fatalf("projectRoot(%q) = %q, want %q", nested, got, want)
-			}
-		})
+	got, err := projectRoot(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = normalizeProjectPath(want)
+	if got != want {
+		t.Fatalf("projectRoot(%q) = %q, want %q", nested, got, want)
+	}
+}
+
+func TestProjectRootSharesIdentityAcrossLinkedWorktree(t *testing.T) {
+	base := t.TempDir()
+	primary := filepath.Join(base, "primary")
+	common := filepath.Join(primary, ".git")
+	admin := filepath.Join(common, "worktrees", "coder")
+	linked := filepath.Join(base, "coder")
+	if err := os.MkdirAll(admin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(linked, "internal", "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(linked, ".git"), []byte("gitdir: "+admin+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(admin, "commondir"), []byte("../..\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	primaryProject, err := projectRoot(primary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkedProject, err := projectRoot(filepath.Join(linked, "internal", "pkg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkedProject != primaryProject {
+		t.Fatalf("linked project = %q, primary project = %q", linkedProject, primaryProject)
+	}
+}
+
+func TestProjectRootRejectsMalformedWorktreeMetadata(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("not a gitdir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := projectRoot(root); err == nil {
+		t.Fatal("projectRoot accepted malformed .git file")
 	}
 }
 
