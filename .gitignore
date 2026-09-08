@@ -1,0 +1,7 @@
+/skpod
+/skpod.exe
+/skpod.exe~
+/skpod-validation
+/skpod-validation.exe
+*.test
+*.out
