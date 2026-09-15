@@ -666,6 +666,12 @@ block delimiter, write it to a temporary file and use --file instead.
 5. Verify reply returns ok:true and shows your payload. Then immediately run the
 listen command again.
 
+If the listener process handle disappears or the harness interrupts it, do not
+assume the mailbox claim was released. Run skpod status NAME. If it reports
+working, inspect the claimed task with skpod task TASK_ID, attempt its
+reply, and only then resume listening. A durable task claim can outlive the
+local listener process until it is replied to or expires.
+
 Human messages take priority. If asked to stop listening or switch work, cancel
 the pending idle listen and do not restart it. Otherwise, after answering a
 human, resume any assigned task or wait on the same idle listener. After an

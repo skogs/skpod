@@ -441,6 +441,9 @@ func TestRunAgentGeneratesNamedWorkerContract(t *testing.T) {
 		"untrusted input",
 		"do not listen again until you have attempted the",
 		"Never launch bare --stdin",
+		"assume the mailbox claim was released",
+		"Run skpod status NAME",
+		"skpod task TASK_ID",
 		"Human messages take priority",
 	} {
 		if !strings.Contains(prompt, required) {
