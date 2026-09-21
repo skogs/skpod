@@ -206,6 +206,10 @@ func runAsk(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	if podErr != nil {
 		return writeError(stdout, stderr, podErr)
 	}
+	project, err := currentProjectRoot()
+	if err != nil {
+		return writeError(stdout, stderr, &agentpod.Error{Code: "PROJECT_ERROR", Message: err.Error(), ExitCode: 1})
+	}
 
 	mailbox, podErr := agentpod.OpenDefaultMailbox()
 	if podErr != nil {
@@ -219,6 +223,7 @@ func runAsk(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		From:    *from,
 		To:      agent,
 		Payload: payload,
+		Project: project,
 		Timeout: *timeout,
 	})
 	if podErr != nil {
@@ -253,6 +258,10 @@ func runSend(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	if podErr != nil {
 		return writeError(stdout, stderr, podErr)
 	}
+	project, err := currentProjectRoot()
+	if err != nil {
+		return writeError(stdout, stderr, &agentpod.Error{Code: "PROJECT_ERROR", Message: err.Error(), ExitCode: 1})
+	}
 
 	mailbox, podErr := agentpod.OpenDefaultMailbox()
 	if podErr != nil {
@@ -266,6 +275,7 @@ func runSend(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		From:     *from,
 		To:       agent,
 		Payload:  payload,
+		Project:  project,
 		Deadline: *workTimeout,
 	})
 	if podErr != nil {
@@ -487,6 +497,7 @@ func runList(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return writeError(stdout, stderr, podErr)
 	}
 	if !*allProjects {
+		allCount := len(result)
 		matching := make([]agentpod.WorkerStatus, 0, len(result))
 		for _, worker := range result {
 			if worker.Project == project {
@@ -494,6 +505,9 @@ func runList(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			}
 		}
 		result = matching
+		if len(result) == 0 && allCount > 0 {
+			_, _ = fmt.Fprintln(stderr, "hint: workers exist in other projects; run `skpod list --all`")
+		}
 	}
 	return writeFormatted(stdout, stderr, result, *format, formatWorkers(result))
 }
@@ -547,6 +561,10 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 		return writeUsageError(stdout, stderr, err)
 	}
+	project, err := currentProjectRoot()
+	if err != nil {
+		return writeError(stdout, stderr, &agentpod.Error{Code: "PROJECT_ERROR", Message: err.Error(), ExitCode: 1})
+	}
 	mailbox, podErr := agentpod.OpenDefaultMailbox()
 	if podErr != nil {
 		return writeError(stdout, stderr, podErr)
@@ -556,6 +574,7 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	if podErr != nil {
 		return writeError(stdout, stderr, podErr)
 	}
+	result.Project = project
 	return writeFormatted(stdout, stderr, result, *format, formatDoctor(result))
 }
 
@@ -788,7 +807,11 @@ func writeFormatted(stdout, stderr io.Writer, data any, format, table string) in
 }
 
 func formatWorker(worker agentpod.WorkerStatus) string {
-	return fmt.Sprintf("NAME\tSTATE\tQUEUED\tTASK\tPROJECT\n%s\t%s\t%d\t%s\t%s", worker.Agent, worker.State, worker.QueueDepth, worker.TaskID, worker.Project)
+	detail := worker.Detail
+	if detail == "" {
+		detail = "-"
+	}
+	return fmt.Sprintf("NAME\tSTATE\tQUEUED\tTASK\tPROJECT\tDETAIL\n%s\t%s\t%d\t%s\t%s\t%s", worker.Agent, worker.State, worker.QueueDepth, worker.TaskID, worker.Project, detail)
 }
 
 func formatWorkers(workers []agentpod.WorkerStatus) string {
@@ -814,7 +837,15 @@ func formatDoctor(result agentpod.DoctorResult) string {
 	for _, key := range keys {
 		counts = append(counts, fmt.Sprintf("%s=%d", key, result.Tasks[key]))
 	}
-	return fmt.Sprintf("STATE\tSCHEMA\tWORKERS\tTASKS\tPATH\n%s\t%d\t%d\t%s\t%s", result.State, result.Schema, result.Workers, strings.Join(counts, ","), result.Path)
+	dead := make([]string, 0, len(result.DeadListeners))
+	for _, listener := range result.DeadListeners {
+		dead = append(dead, fmt.Sprintf("%s(pid=%d)", listener.Agent, listener.PID))
+	}
+	deadValue := "-"
+	if len(dead) > 0 {
+		deadValue = strings.Join(dead, ",")
+	}
+	return fmt.Sprintf("STATE\tSCHEMA\tWORKERS\tTASKS\tPROJECT\tDEAD LISTENERS\tPATH\n%s\t%d\t%d\t%s\t%s\t%s\t%s", result.State, result.Schema, result.Workers, strings.Join(counts, ","), result.Project, deadValue, result.Path)
 }
 
 func writeError(stdout, stderr io.Writer, podErr *agentpod.Error) int {
@@ -889,7 +920,8 @@ Discovery & Status:
   A worker is briefly "between_listens" after pull or reply: send can queue work,
   but ask requires the worker to be actively listening.
   "list" shows active workers in the caller's current project; use "list --all"
-  for every project. When requesting review, prefer another listening same-project
+  for every project. "ask" and "send" target workers in the caller's current project.
+  When requesting review, prefer another listening same-project
   worker whose lowercase name contains "review".
 
 Storage:

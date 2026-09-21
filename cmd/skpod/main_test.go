@@ -192,6 +192,11 @@ func TestRunListShowsHubEnrolledWorkers(t *testing.T) {
 	if outcome := receiveCLI(t, listening); outcome.exitCode != 3 {
 		t.Fatalf("canceled listener = %#v, want exit 3", outcome)
 	}
+	stdout.Reset()
+	var stderr bytes.Buffer
+	if exitCode = run(context.Background(), []string{"list"}, strings.NewReader(""), &stdout, &stderr); exitCode != 0 || !strings.Contains(stderr.String(), "list --all") {
+		t.Fatalf("cross-project list hint: exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
 }
 
 func TestRunCompletesCLIAsyncSendAndWait(t *testing.T) {

@@ -276,7 +276,7 @@ func TestMailboxTimeoutFinalizersReturnCommittedResults(t *testing.T) {
 		t.Fatal(podErr)
 	}
 
-	syncTask, podErr := mb.dispatch(ctx, "ask", "driver", "reviewer", "sync", time.Second, false)
+	syncTask, podErr := mb.dispatch(ctx, "ask", "driver", "reviewer", "sync", "", time.Second, false)
 	if podErr != nil {
 		t.Fatal(podErr)
 	}

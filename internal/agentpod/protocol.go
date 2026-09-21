@@ -57,11 +57,13 @@ type Message struct {
 
 type AskRequest struct {
 	From, To, Payload string
+	Project           string
 	Timeout           time.Duration
 }
 
 type SendRequest struct {
 	From, To, Payload string
+	Project           string
 	Deadline          time.Duration
 }
 
@@ -131,12 +133,19 @@ type CancelResult struct {
 }
 
 type DoctorResult struct {
-	State       string         `json:"state"`
-	Path        string         `json:"path"`
-	Schema      int            `json:"schema"`
-	Workers     int            `json:"workers"`
-	Tasks       map[string]int `json:"tasks"`
-	LastPruneAt time.Time      `json:"last_prune_at,omitzero"`
+	State         string         `json:"state"`
+	Path          string         `json:"path"`
+	Project       string         `json:"project,omitempty"`
+	Schema        int            `json:"schema"`
+	Workers       int            `json:"workers"`
+	Tasks         map[string]int `json:"tasks"`
+	DeadListeners []DeadListener `json:"dead_listeners,omitempty"`
+	LastPruneAt   time.Time      `json:"last_prune_at,omitzero"`
+}
+
+type DeadListener struct {
+	Agent string `json:"agent"`
+	PID   int    `json:"pid"`
 }
 
 type QueuedTask struct {
@@ -151,6 +160,7 @@ type WorkerStatus struct {
 	Agent      string       `json:"agent"`
 	Project    string       `json:"project,omitempty"`
 	State      string       `json:"state"`
+	Detail     string       `json:"detail,omitempty"`
 	TaskID     string       `json:"task_id,omitempty"`
 	Deadline   time.Time    `json:"expires_at,omitzero"`
 	ClaimedAt  time.Time    `json:"claimed_at,omitzero"`
@@ -183,11 +193,20 @@ func contextError(operation string, err error, deliveryUnknown bool) *Error {
 	code, message := "CANCELED", operation+" was canceled"
 	if errors.Is(err, context.DeadlineExceeded) {
 		code, message = "TIMEOUT", operation+" timed out"
+		message += "; inspect related work with `skpod task TASK_ID` and `skpod status AGENT`"
 	}
 	if deliveryUnknown {
 		message += "; the worker already holds the task"
 	}
 	return newError(code, message, 3, 408)
+}
+
+func projectMismatch(agent, enrolled, current string) *Error {
+	return newError("PROJECT_MISMATCH", fmt.Sprintf("agent %q is enrolled in project %q, not current project %q; run `skpod list --all` to inspect workers across projects", agent, enrolled, current), 4, 409)
+}
+
+func deadListener(agent string, pid int) *Error {
+	return newError("AGENT_OFFLINE", fmt.Sprintf("agent %q listener process (PID %d) terminated; run `skpod agent %s` in that session to re-listen", agent, pid, agent), 4, 409)
 }
 
 func validateAgentName(field, value string) *Error {

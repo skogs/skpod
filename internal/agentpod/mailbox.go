@@ -565,7 +565,7 @@ func checkWorkerProject(ctx context.Context, tx *sql.Tx, w *workerRow, project s
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE to_agent = ? AND status IN ('pending', 'working'))`, w.agent).Scan(&pending); err != nil {
 		return databaseError("check project ownership", err)
 	}
-	live := (w.state == WorkerListening && now.Sub(w.lastSeen) < ListenerLiveness) ||
+	live := listenerActive(w, now) ||
 		(w.state == WorkerPolling && now.Sub(w.lastSeen) < PollingPresence)
 	if pending || live {
 		return newError("PROJECT_MISMATCH", fmt.Sprintf("agent %q belongs to project %q; use a different name or drain its work in that project first", w.agent, w.project), 4, 409)
@@ -587,7 +587,7 @@ func (m *Mailbox) enrollTx(ctx context.Context, tx *sql.Tx, agent, project, sess
 	if podErr != nil || recovered != nil {
 		return recovered, podErr
 	}
-	if w != nil && w.state == WorkerListening && w.session != session && now.Sub(w.lastSeen) < ListenerLiveness {
+	if w != nil && w.session != session && listenerActive(w, now) {
 		return nil, alreadyListening(agent)
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -632,10 +632,11 @@ func (m *Mailbox) Listen(ctx context.Context, request ListenRequest) (ListenResu
 	if err := ctx.Err(); err != nil {
 		return ListenResult{}, contextError("listen", err, false)
 	}
-	session, err := randomID()
+	token, err := randomID()
 	if err != nil {
 		return ListenResult{}, newError("ID_ERROR", "generate listener session", 1, 500)
 	}
+	session := newSession(token)
 
 	m.pruneIfDue(ctx)
 
@@ -754,10 +755,11 @@ func (m *Mailbox) Pull(ctx context.Context, agent, project string) (ListenResult
 	if err := ctx.Err(); err != nil {
 		return ListenResult{}, contextError("pull", err, false)
 	}
-	session, err := randomID()
+	token, err := randomID()
 	if err != nil {
 		return ListenResult{}, newError("ID_ERROR", "generate listener session", 1, 500)
 	}
+	session := newSession(token)
 
 	m.pruneIfDue(ctx)
 
@@ -779,7 +781,7 @@ func (m *Mailbox) Pull(ctx context.Context, agent, project string) (ListenResult
 			result = *recovered
 			return nil
 		}
-		if w != nil && w.state == WorkerListening && now.Sub(w.lastSeen) < ListenerLiveness {
+		if w != nil && listenerActive(w, now) {
 			return alreadyListening(agent)
 		}
 		if _, err := tx.ExecContext(ctx, `
@@ -817,7 +819,7 @@ func (m *Mailbox) Send(ctx context.Context, request SendRequest) (SendResult, *E
 	if podErr := validateTaskDispatch(request.From, request.To, request.Payload, "send work timeout", request.Deadline); podErr != nil {
 		return SendResult{}, podErr
 	}
-	return m.dispatch(ctx, "send", request.From, request.To, request.Payload, request.Deadline, true)
+	return m.dispatch(ctx, "send", request.From, request.To, request.Payload, request.Project, request.Deadline, true)
 }
 
 // Ask sends a synchronous task to a live listener and waits for its reply.
@@ -825,7 +827,7 @@ func (m *Mailbox) Ask(ctx context.Context, request AskRequest) (AskResult, *Erro
 	if podErr := validateTaskDispatch(request.From, request.To, request.Payload, "ask timeout", request.Timeout); podErr != nil {
 		return AskResult{}, podErr
 	}
-	sent, podErr := m.dispatch(ctx, "ask", request.From, request.To, request.Payload, request.Timeout, false)
+	sent, podErr := m.dispatch(ctx, "ask", request.From, request.To, request.Payload, request.Project, request.Timeout, false)
 	if podErr != nil {
 		return AskResult{}, podErr
 	}
@@ -927,7 +929,7 @@ func (m *Mailbox) finalizeAsk(id string, request AskRequest, cause error) (AskRe
 	return result, outcome
 }
 
-func (m *Mailbox) dispatch(ctx context.Context, operation, from, to, payload string, deadline time.Duration, async bool) (SendResult, *Error) {
+func (m *Mailbox) dispatch(ctx context.Context, operation, from, to, payload, project string, deadline time.Duration, async bool) (SendResult, *Error) {
 	if err := ctx.Err(); err != nil {
 		return SendResult{}, contextError(operation, err, false)
 	}
@@ -947,6 +949,12 @@ func (m *Mailbox) dispatch(ctx context.Context, operation, from, to, payload str
 		}
 		if w == nil {
 			return workerUnavailable(to, WorkerOffline)
+		}
+		if project != "" && w.project != project {
+			return projectMismatch(to, w.project, project)
+		}
+		if pid, dead := listenerDead(w); dead {
+			return deadListener(to, pid)
 		}
 		if w.taskID != "" {
 			switch {
@@ -1275,8 +1283,18 @@ func (m *Mailbox) Doctor(ctx context.Context) (DoctorResult, *Error) {
 		return result, newError("DATABASE_CORRUPT", "SQLite quick_check reported: "+result.State, 1, 500)
 	}
 	result.State = "healthy"
-	if err := m.db.QueryRowContext(ctx, `SELECT count(*) FROM workers`).Scan(&result.Workers); err != nil {
+	workers, err := loadWorkers(ctx, m.db)
+	if err != nil {
 		return DoctorResult{}, m.storageError(ctx, "doctor", err)
+	}
+	result.Workers = len(workers)
+	for _, worker := range workers {
+		if pid, dead := listenerDead(worker); dead {
+			result.DeadListeners = append(result.DeadListeners, DeadListener{Agent: worker.agent, PID: pid})
+		}
+	}
+	if len(result.DeadListeners) > 0 {
+		result.State = "degraded"
 	}
 	rows, err := m.db.QueryContext(ctx, `SELECT status, count(*) FROM tasks GROUP BY status ORDER BY status`)
 	if err != nil {
@@ -1317,9 +1335,13 @@ func (m *Mailbox) asyncWaitTimeoutError(id, agent string) *Error {
 	case WorkerOffline:
 		guidance = "the worker is not present; have it listen again so it can claim the task, or stop waiting"
 	}
+	stateDesc := status.State
+	if status.Detail != "" {
+		stateDesc = fmt.Sprintf("%s (%s)", status.State, status.Detail)
+	}
 	return newError(
 		"WAIT_TIMEOUT",
-		fmt.Sprintf("wait for task %s timed out; the task was not canceled and agent %q is %s; %s", id, agent, status.State, guidance),
+		fmt.Sprintf("wait for task %s timed out; the task was not canceled and agent %q is %s; %s; inspect with `skpod task %s` and `skpod status %s`", id, agent, stateDesc, guidance, id, agent),
 		3,
 		408,
 	)
@@ -1376,7 +1398,10 @@ func (m *Mailbox) statusOf(agent string, w *workerRow, queue []QueuedTask) Worke
 	}
 	switch w.state {
 	case WorkerListening:
-		if now.Sub(w.lastSeen) < ListenerLiveness {
+		if pid, dead := listenerDead(w); dead {
+			status.Project = w.project
+			status.Detail = fmt.Sprintf("listener process (PID %d) terminated; run `skpod agent %s` to re-listen", pid, agent)
+		} else if now.Sub(w.lastSeen) < ListenerLiveness {
 			status.State = WorkerListening
 		}
 	case WorkerPolling:
